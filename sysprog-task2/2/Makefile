@@ -1,7 +1,7 @@
-GCC_FLAGS = -Wextra -Werror -Wall -Wno-gnu-folding-constant
+GCC_FLAGS = -Wextra -Werror -Wall -Wno-gnu-folding-constant -g
 
 all:
-	gcc $(GCC_FLAGS) solution.c parser.c rlist.h -o mybash
+	gcc $(GCC_FLAGS) solution.c parser.c list.c -o mybash
 
 # For automatic testing systems to be able to just build whatever was submitted
 # by a student.
