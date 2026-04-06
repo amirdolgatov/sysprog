@@ -17,36 +17,35 @@ struct exec_command
 	const struct command * cmd;
 	bool pipe_input;
 	bool pipe_output;
+	int32_t out[2];      // 1 - write STDOUT, 0 - for read from this process
+	int32_t in;		     // STDIN for this process
 };
 
 char **argv = NULL;
 int argc = 0;
 
-int to_parent[2];
-int to_child[2];
+char** create_argv(const struct command *cmd)
+{
+	argc = cmd->arg_count + 2;
+	argv = (char **)realloc(argv, argc * sizeof(char *));
+	if (NULL == argv)
+	{
+		argc = 0;
+		return NULL;
+	}
 
-// char** create_argv(const struct command *cmd)
-// {
-// 	argc = cmd->arg_count + 2;
-// 	argv = (char **)realloc(argv, argc * sizeof(char *));
-// 	if (NULL == argv)
-// 	{
-// 		argc = 0;
-// 		return NULL;
-// 	}
-//
-// 	uint32_t i = 0;
-// 	uint32_t j = 0;
-// 	argv[i++] = cmd->exe;
-// 	while (i <= cmd->arg_count)
-// 	{
-// 		// printf("cmd->args[j] = %s", cmd->args[j]);
-// 		argv[i++] = cmd->args[j++];
-// 	}
-//
-// 	argv[i] = NULL;
-// 	return argv;
-// }
+	uint32_t i = 0;
+	uint32_t j = 0;
+	argv[i++] = cmd->exe;
+	while (i <= cmd->arg_count)
+	{
+		// printf("cmd->args[j] = %s", cmd->args[j]);
+		argv[i++] = cmd->args[j++];
+	}
+
+	argv[i] = NULL;
+	return argv;
+}
 
 // static void
 // execute_command_line(const struct command_line *line)
@@ -106,44 +105,49 @@ int to_child[2];
 // 	}
 // }
 
-// void set_io(struct exec_command * cmd)
-// {
-// 	if (cmd->pipe_input)
-// 	{
-// 		dup2(to_parent[0], STDIN_FILENO);
-// 	}
-// 	if (cmd->pipe_output)
-// 	{
-// 		dup2(to_parent[1], STDOUT_FILENO);  // default direction of stdout (to parent, may be to file)
-// 	}
-//
-// 	close(to_parent[1]);
-// 	close(to_child[0]);
-// 	close(to_parent[0]);
-// 	close(to_child[1]);
-// }
+void set_output(struct exec_command * cmd)
+{
+	if (cmd->pipe_input)
+	{
+		dup2(cmd->in, STDIN_FILENO);
+	}
+	if (cmd->pipe_output)
+	{
+		dup2(cmd->out[1], STDOUT_FILENO);  // default direction of stdout (to parent, may be to file)
+	}
 
-// void exec_wrapper(struct exec_command * command)
-// {
-// 	char** args = create_argv(command->cmd);
-// 	if (NULL != args)
-// 	{
-// 		if (fork() == 0)
-// 		{
-// 			set_io(command);
-// 			int ret = execvp(command->cmd->exe, argv);
-// 			if (ret == -1)
-// 			{
-// 				perror ("execv");
-// 				exit (EXIT_FAILURE);
-// 			}
-// 		}
-// 	}
-//
-// 	// ждём завершения обоих потомков, чтобы не оставлять зомби
-// 	wait(NULL);
-// 	wait(NULL);
-// }
+	close(cmd->in);
+	close(cmd->out[0]);
+	close(cmd->out[1]);
+}
+
+void exec_wrapper(struct exec_command * command)
+{
+	char** args = create_argv(command->cmd);
+	if (NULL != args)
+	{
+		if (strcmp(command->cmd->exe, "cd") == 0)
+		{
+			chdir(command->cmd->args[0]);
+		}
+		else
+		{
+			if (fork() == 0)
+			{
+				// set_output(command);
+				int ret = execvp(command->cmd->exe, args);
+				if (ret == -1)
+				{
+					perror ("execv");
+					exit (EXIT_FAILURE);
+				}
+			}
+		}
+	}
+	// ждём завершения обоих потомков, чтобы не оставлять зомби
+	// wait(NULL);
+	// wait(NULL);
+}
 
 struct list * read_command(const struct command_line *line)
 {
@@ -166,6 +170,7 @@ struct list * read_command(const struct command_line *line)
 	expr = line->head;
 	cmd_buffer[i].cmd = &expr->cmd;
 	cmd_buffer[i].pipe_input = 0;
+	cmd_buffer[i].pipe_output = 0;
 
 	if (expr == line->tail)         // один элемент в списке
 	{
@@ -180,6 +185,7 @@ struct list * read_command(const struct command_line *line)
 			++i;
 			cmd_buffer[i].cmd = &expr->cmd;
 			cmd_buffer[i].pipe_input = cmd_buffer[i - 1].pipe_output;
+			cmd_buffer[i].pipe_output = 0;
 		}
 		else if (expr->type == EXPR_TYPE_PIPE)
 		{
@@ -195,12 +201,43 @@ execute_command_line(const struct command_line *line)
 {
 	struct list * cmd_list = read_command(line);
 	struct exec_command * cmd_buffer = cmd_list->data;
-	for (uint32_t i = 0; i < cmd_list->size; i++)
+
+	// for (uint32_t i = 0; i < cmd_list->size; i++)
+	// {
+	// 	printf("command: %s\n", cmd_buffer[i].cmd->exe);
+	// 	printf("\tin: %d\n", cmd_buffer[i].pipe_input);
+	// 	printf("\tout: %d\n", cmd_buffer[i].pipe_output);
+	// }
+
+	// обрабатываем первую команду
+
+	uint32_t i = 0;
+	if (cmd_buffer[i].pipe_output)
 	{
-		printf("command: %s\n", cmd_buffer[i].cmd->exe);
-		printf("\tin: %d\n", cmd_buffer[i].pipe_input);
-		printf("\tout: %d\n", cmd_buffer[i].pipe_output);
+		// pipe(cmd_buffer[i].out);
 	}
+	exec_wrapper(&cmd_buffer[i]);
+	++i;
+
+	for ( ; i < cmd_list->size; i++)
+	{
+		// пройти по списку
+		// if (cmd_buffer[i].pipe_output)
+		// {
+		// 	// pipe(cmd_buffer[i].out);
+		// }
+		// if (cmd_buffer[i].pipe_input)
+		// {
+		// 	cmd_buffer[i].in = cmd_buffer[i - 1].out[0];
+		// }
+		exec_wrapper(&cmd_buffer[i]);
+	}
+
+	for (i = 0; i < cmd_list->size; i++)
+	{
+		wait(NULL);
+	}
+
 	list_free(cmd_list);
 }
 
