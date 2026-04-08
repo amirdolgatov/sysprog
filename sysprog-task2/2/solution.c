@@ -110,15 +110,14 @@ void set_output(struct exec_command * cmd)
 	if (cmd->pipe_input)
 	{
 		dup2(cmd->in, STDIN_FILENO);
+		close(cmd->in);
 	}
 	if (cmd->pipe_output)
 	{
 		dup2(cmd->out[1], STDOUT_FILENO);  // default direction of stdout (to parent, may be to file)
+		close(cmd->out[0]);
+		close(cmd->out[1]);
 	}
-
-	close(cmd->in);
-	close(cmd->out[0]);
-	close(cmd->out[1]);
 }
 
 void exec_wrapper(struct exec_command * command)
@@ -126,7 +125,7 @@ void exec_wrapper(struct exec_command * command)
 	char** args = create_argv(command->cmd);
 	if (NULL != args)
 	{
-		if (strcmp(command->cmd->exe, "cd") == 0)
+		if (strcmp(command->cmd->exe, "cd") == 0)          // смена директории - обязателно в текущем процессе, а не в дочернем
 		{
 			chdir(command->cmd->args[0]);
 		}
@@ -134,7 +133,23 @@ void exec_wrapper(struct exec_command * command)
 		{
 			if (fork() == 0)
 			{
-				// set_output(command);
+				// printf("Process %s, pid = %d\n", command->cmd->exe, (int) getpid());
+				set_output(command);
+				// Читаем данные
+				// char buffer[100];
+				// ssize_t nbytes = read(fd[0], buffer, sizeof(buffer));
+				// if (nbytes > 0) {
+				// 	printf("Прочитано: %.*s\n", (int)nbytes, buffer);
+				// }
+
+				// fgets(буфер, размер, поток)
+				// if (fgets(buffer, sizeof(buffer), stdin) != NULL)
+				// {
+				// 	// Удаление символа новой строки '\n', если он был считан
+				// 	buffer[strcspn(buffer, "\n")] = '\0';
+				// 	printf("Вы ввели: %s\n", buffer);
+				// }
+
 				int ret = execvp(command->cmd->exe, args);
 				if (ret == -1)
 				{
@@ -211,10 +226,15 @@ execute_command_line(const struct command_line *line)
 
 	// обрабатываем первую команду
 
+	if (cmd_list->size == 0)
+	{
+		return;							// нет команд, выход
+	}
+
 	uint32_t i = 0;
 	if (cmd_buffer[i].pipe_output)
 	{
-		// pipe(cmd_buffer[i].out);
+		pipe(cmd_buffer[i].out);
 	}
 	exec_wrapper(&cmd_buffer[i]);
 	++i;
@@ -222,16 +242,22 @@ execute_command_line(const struct command_line *line)
 	for ( ; i < cmd_list->size; i++)
 	{
 		// пройти по списку
-		// if (cmd_buffer[i].pipe_output)
-		// {
-		// 	// pipe(cmd_buffer[i].out);
-		// }
-		// if (cmd_buffer[i].pipe_input)
-		// {
-		// 	cmd_buffer[i].in = cmd_buffer[i - 1].out[0];
-		// }
+		if (cmd_buffer[i].pipe_output)
+		{
+			pipe(cmd_buffer[i].out);
+		}
+		if (cmd_buffer[i].pipe_input)
+		{
+			cmd_buffer[i].in = cmd_buffer[i - 1].out[0];
+		}
+
+		close(cmd_buffer[i - 1].out[1]);
 		exec_wrapper(&cmd_buffer[i]);
+		close(cmd_buffer[i - 1].out[0]);
 	}
+
+	close(cmd_buffer[cmd_list->size - 1].out[0]);
+	close(cmd_buffer[cmd_list->size - 1].out[1]);
 
 	for (i = 0; i < cmd_list->size; i++)
 	{
