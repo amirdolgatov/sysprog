@@ -1,6 +1,7 @@
 #include "parser.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,12 +18,19 @@ struct exec_command
 	const struct command * cmd;
 	bool pipe_input;
 	bool pipe_output;
+	bool is_last;
 	int32_t out[2];      // 1 - write STDOUT, 0 - for read from this process
 	int32_t in;		     // STDIN for this process
+	enum output_type out_type;
+	/** Valid if the out type is FILE. */
+	char *out_file;
 };
 
 char **argv = NULL;
 int argc = 0;
+int fork_count = 0;
+int g_last_exit_code = 0;
+
 
 char** create_argv(const struct command *cmd)
 {
@@ -118,50 +126,100 @@ void set_output(struct exec_command * cmd)
 		close(cmd->out[0]);
 		close(cmd->out[1]);
 	}
+	else
+	{
+		if (!cmd->is_last)
+		{
+			return;
+		}
+
+		if (cmd->out_file == NULL)
+		{
+			return;
+		}
+
+		switch(cmd->out_type)
+		{
+			case OUTPUT_TYPE_FILE_NEW: // Аналог ">"
+			{
+				// Добавляем O_TRUNC
+				cmd->out[1] = open(cmd->out_file, O_WRONLY | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+				if (cmd->out[1] != -1)
+				{
+					dup2(cmd->out[1], STDOUT_FILENO);
+					close(cmd->out[1]); // Важно закрыть после копирования
+				}
+			}
+			break;
+
+			case OUTPUT_TYPE_FILE_APPEND: // Аналог ">>"
+			{
+				// Используем O_APPEND
+				cmd->out[1] = open(cmd->out_file, O_WRONLY | O_CREAT | O_APPEND, S_IRUSR | S_IWUSR);
+				if (cmd->out[1] != -1)
+				{
+					dup2(cmd->out[1], STDOUT_FILENO);
+					close(cmd->out[1]);
+				}
+			}
+			break;
+			default:
+			{
+
+			}
+		}
+	}
+
 }
 
-void exec_wrapper(struct exec_command * command)
+pid_t exec_wrapper(struct exec_command * command)
 {
 	char** args = create_argv(command->cmd);
 	if (NULL != args)
 	{
 		if (strcmp(command->cmd->exe, "cd") == 0)          // смена директории - обязателно в текущем процессе, а не в дочернем
 		{
-			chdir(command->cmd->args[0]);
-		}
-		else
-		{
-			if (fork() == 0)
+			if (command->cmd->arg_count > 0)
 			{
-				// printf("Process %s, pid = %d\n", command->cmd->exe, (int) getpid());
-				set_output(command);
-				// Читаем данные
-				// char buffer[100];
-				// ssize_t nbytes = read(fd[0], buffer, sizeof(buffer));
-				// if (nbytes > 0) {
-				// 	printf("Прочитано: %.*s\n", (int)nbytes, buffer);
-				// }
+				chdir(command->cmd->args[0]);
+			}
+			return 0;
+		}
+		// 2. EXIT как ОДИНОЧНАЯ команда (завершает шелл)
+		if (strcmp(command->cmd->exe, "exit") == 0 && !command->pipe_input && !command->pipe_output)
+		{
+			int code = 0;
+			if (command->cmd->arg_count > 0)
+			{
+				code = atoi(command->cmd->args[0]);
+			}
+			exit(code); // Прикончит основной процесс
+		}
 
-				// fgets(буфер, размер, поток)
-				// if (fgets(buffer, sizeof(buffer), stdin) != NULL)
-				// {
-				// 	// Удаление символа новой строки '\n', если он был считан
-				// 	buffer[strcspn(buffer, "\n")] = '\0';
-				// 	printf("Вы ввели: %s\n", buffer);
-				// }
+		fork_count++;
+		pid_t pid = fork();
+		if (pid == 0)
+		{
+			set_output(command);
 
-				int ret = execvp(command->cmd->exe, args);
-				if (ret == -1)
+			if (strcmp(command->cmd->exe, "exit") == 0)          // выход из процесса
+			{
+				if (command->cmd->arg_count > 0)
 				{
-					perror ("execv");
-					exit (EXIT_FAILURE);
+					int code = atoi(command->cmd->args[0]);
+					exit(code);
 				}
 			}
+			int ret = execvp(command->cmd->exe, args);
+			if (ret == -1)
+			{
+				perror ("execv");
+				exit (EXIT_FAILURE);
+			}
 		}
+		return pid;
 	}
-	// ждём завершения обоих потомков, чтобы не оставлять зомби
-	// wait(NULL);
-	// wait(NULL);
+	return 0;
 }
 
 struct list * read_command(const struct command_line *line)
@@ -177,6 +235,11 @@ struct list * read_command(const struct command_line *line)
 		expr = expr->next;
 	}
 
+	if (size == 0)
+	{
+		return NULL;
+	}
+
 	struct list * command_list = create_list(size, sizeof(struct exec_command));
 	assert(command_list);
 	struct exec_command * cmd_buffer = command_list->data;
@@ -189,6 +252,9 @@ struct list * read_command(const struct command_line *line)
 
 	if (expr == line->tail)         // один элемент в списке
 	{
+		cmd_buffer[i].is_last = 1;   // last command
+		cmd_buffer[i].out_type = line->out_type;
+		cmd_buffer[i].out_file = line->out_file;
 		return command_list;
 	}
 
@@ -208,6 +274,10 @@ struct list * read_command(const struct command_line *line)
 		}
 		expr = expr->next;
 	}
+
+	cmd_buffer[i].is_last = 1;   // last command
+	cmd_buffer[i].out_type = line->out_type;
+	cmd_buffer[i].out_file = line->out_file;
 	return command_list;
 }
 
@@ -216,13 +286,8 @@ execute_command_line(const struct command_line *line)
 {
 	struct list * cmd_list = read_command(line);
 	struct exec_command * cmd_buffer = cmd_list->data;
-
-	// for (uint32_t i = 0; i < cmd_list->size; i++)
-	// {
-	// 	printf("command: %s\n", cmd_buffer[i].cmd->exe);
-	// 	printf("\tin: %d\n", cmd_buffer[i].pipe_input);
-	// 	printf("\tout: %d\n", cmd_buffer[i].pipe_output);
-	// }
+	pid_t last_pid = 0;
+	fork_count = 0;
 
 	// обрабатываем первую команду
 
@@ -236,7 +301,7 @@ execute_command_line(const struct command_line *line)
 	{
 		pipe(cmd_buffer[i].out);
 	}
-	exec_wrapper(&cmd_buffer[i]);
+	last_pid = exec_wrapper(&cmd_buffer[i]);
 	++i;
 
 	for ( ; i < cmd_list->size; i++)
@@ -252,16 +317,29 @@ execute_command_line(const struct command_line *line)
 		}
 
 		close(cmd_buffer[i - 1].out[1]);
-		exec_wrapper(&cmd_buffer[i]);
+		last_pid = exec_wrapper(&cmd_buffer[i]);
 		close(cmd_buffer[i - 1].out[0]);
 	}
 
-	close(cmd_buffer[cmd_list->size - 1].out[0]);
-	close(cmd_buffer[cmd_list->size - 1].out[1]);
-
-	for (i = 0; i < cmd_list->size; i++)
+	// Вместо безусловного close в конце execute_command_line:
+	if (cmd_buffer[cmd_list->size - 1].pipe_output)
 	{
-		wait(NULL);
+		close(cmd_buffer[cmd_list->size - 1].out[0]);
+		close(cmd_buffer[cmd_list->size - 1].out[1]);
+	}
+
+	int status;
+	for (int i = 0; i < fork_count; i++)
+	{
+		int current_pid = wait(&status);
+		if (current_pid == last_pid)
+		{
+			// Нас интересует только статус последнего в конвейере
+			if (WIFEXITED(status))
+			{
+				g_last_exit_code = WEXITSTATUS(status);
+			}
+		}
 	}
 
 	list_free(cmd_list);
@@ -293,5 +371,5 @@ main(void)
 		}
 	}
 	parser_delete(p);
-	return 0;
+	return g_last_exit_code;
 }
