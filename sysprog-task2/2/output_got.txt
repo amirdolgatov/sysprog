@@ -1,8 +1,4 @@
-tmp
-tmpfile
-tmp
-tmpfile
-	cd command is not implemented
-	cd command is not implemented
-	cd command is not implemented
-	cd command is not implemented
+cat: -: Bad file descriptor
+cat: closing standard input: Bad file descriptor
+grep: (standard input)grep: (standard input): Bad file descriptor
+: Bad file descriptor
