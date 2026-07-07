@@ -3,6 +3,7 @@
 #include <rlist.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 enum TASK_STATE
 {
@@ -11,6 +12,13 @@ enum TASK_STATE
 	RUNNING,
 	END
 };
+
+struct task_queue
+{
+	struct rlist head;
+	int size;
+	pthread_mutex_t mutex;			// защита очереди от одновременного доступа
+}
 
 struct thread_task
 {
@@ -26,9 +34,53 @@ struct thread_pool
 	pthread_t *threads;
 	uint32_t thread_count;
 	uint32_t thread_limit;
-	struct rlist task_queue_head;
+	pthread_cond_t task_condvar;   		// оповещение потоков о новой задаче
 	/* PUT HERE OTHER MEMBERS */
 };
+
+
+void 
+task_queue_init(struct task_queue *queue)
+{
+	queue->size = 0;
+	rlist_create(&queue->head);
+	queue->task_condvar = PTHREAD_COND_INITIALIZER;
+}
+
+int 
+task_queue_push(struct task_queue *queue, struct thread_task *task)
+{
+	pthread_mutex_lock(&queue->mutex);
+	if (queue->size >= TPOOL_MAX_TASKS)
+	{
+		pthread_mutex_unlock(&mutex);
+		return TPOOL_ERR_TOO_MANY_TASKS;
+	}
+	
+	rlist_add_tail_entry(&queue->head, &task->rlist_node, rlist_node);
+	queue->size++;
+	
+	pthread_mutex_unlock(&mutex);
+	return 0;
+}
+
+struct thread_task*
+task_queue_pop(struct task_queue *queue)
+{
+	pthread_mutex_lock(&queue->mutex);
+	if (queue->size == 0)
+	{
+		pthread_mutex_unlock(&mutex);
+		return NULL;
+	}
+	
+	rlist_add_tail_entry(&queue->head, &task->rlist_node, rlist_node);
+	queue->size++;
+	
+	pthread_mutex_unlock(&mutex);
+	return 0;
+}
+
 
 int
 thread_pool_new(int max_thread_count, struct thread_pool **pool)
@@ -43,8 +95,8 @@ thread_pool_new(int max_thread_count, struct thread_pool **pool)
 	pool_ptr->threads = malloc(max_thread_count * sizeof(pthread_t));
 	pool_ptr->thread_limit = max_thread_count;
 	pool_ptr->thread_count = 0;
-	// pool has task queue
-	rlist_create(&pool_ptr->task_queue_head);
+	pool_ptr->task_condvar = PTHREAD_COND_INITIALIZER;
+	
 	*pool = pool_ptr;
 
 	return 0;
