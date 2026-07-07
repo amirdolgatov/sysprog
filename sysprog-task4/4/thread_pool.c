@@ -13,6 +13,14 @@ enum TASK_STATE
 	END
 };
 
+enum WORKER_STATE
+{
+	CHECK_TASK,
+	EXECUTE,
+	WAITING,
+	TERMINATE
+};
+
 struct task_queue
 {
 	struct rlist head;
@@ -26,6 +34,7 @@ struct thread_task
 	void *arg;
 	int32_t status;
 	struct rlist rlist_node;
+	pthread_mutex_t state_mutex;
 	/* PUT HERE OTHER MEMBERS */
 };
 
@@ -34,17 +43,51 @@ struct thread_pool
 	pthread_t *threads;
 	uint32_t thread_count;
 	uint32_t thread_limit;
-	pthread_cond_t task_condvar;   		// оповещение потоков о новой задаче
+	pthread_cond_t new_task_condvar;   		// оповещение потоков о новой задаче
+	struct task_queue *queue;
+	int active_workers;
+	pthread_mutex_t active_workers_mutex;
 	/* PUT HERE OTHER MEMBERS */
 };
 
+int get_task_status(struct thread_task *task)
+{
+	pthread_mutex_lock(&task->state_mutex);
+	int state = task->status;
+	pthread_mutex_unlock(&task->state_mutex);
+	return state;
+}
 
-void 
+
+
+void increment_active_workers(struct thread_pool *pool)
+{
+	pthread_mutex_lock(&pool->active_workers_mutex);
+	pool->active_workers++;
+	pthread_mutex_unlock(&pool->active_workers_mutex);
+}
+
+void decrement_active_workers(struct thread_pool *pool)
+{
+	pthread_mutex_lock(&pool->active_workers_mutex);
+	pool->active_workers--;
+	pthread_mutex_unlock(&pool->active_workers_mutex);
+}
+
+int get_active_workers(struct thread_pool *pool)
+{
+	pthread_mutex_lock(&pool->active_workers_mutex);
+	int count = pool->active_workers;
+	pthread_mutex_unlock(&pool->active_workers_mutex);
+	return count;
+}
+
+int
 task_queue_init(struct task_queue *queue)
 {
 	queue->size = 0;
 	rlist_create(&queue->head);
-	queue->task_condvar = PTHREAD_COND_INITIALIZER;
+	return pthread_mutex_init(&queue->mutex, NULL);
 }
 
 int 
@@ -81,6 +124,73 @@ task_queue_pop(struct task_queue *queue)
 	return 0;
 }
 
+int 
+create_thread(pthread_t *thread_id, thread_task_f function, void *arg)
+{
+	int result = pthread_create(thread_id, NULL, thread_function, arg);
+	if (0 == result) 
+	{
+        // эта функция не нужна ????
+    }
+    else
+    {
+    	fprintf(stderr, "Error creating thread\n");
+        return 1;
+    }
+}
+
+
+//! the main function, performs the work cycle of the thread
+void worker(struct thread_pool *pool)
+{
+	// firstly increment
+	increment_active_workers(pool);
+	// second check task in queue
+	int run = 1;            			// how to terminate thread ?
+	int state = CHECK_TASK;
+	struct thread_task *task = NULL;
+
+	while (run)
+	{
+		switch (state)
+		{
+			case CHECK_TASK:
+			{
+				struct thread_task *task = task_queue_pop(&pool->task_queue_head);
+				if (NULL == task)
+				{
+					state = WAITING;
+				}
+				else
+				{
+					state = EXECUTE;
+				}
+			}
+			break;
+
+			case WAITING:
+			{
+
+			} 
+			break;
+
+			case EXECUTE:
+			{
+				if (NULL == task)
+				{
+					state = WAITING;
+				}
+				else
+				{
+					task->status = RUNNING;
+					task->function(arg);
+					task->status = END;
+				}
+			}
+			break;
+		}
+	}
+}
 
 int
 thread_pool_new(int max_thread_count, struct thread_pool **pool)
@@ -95,10 +205,12 @@ thread_pool_new(int max_thread_count, struct thread_pool **pool)
 	pool_ptr->threads = malloc(max_thread_count * sizeof(pthread_t));
 	pool_ptr->thread_limit = max_thread_count;
 	pool_ptr->thread_count = 0;
-	pool_ptr->task_condvar = PTHREAD_COND_INITIALIZER;
-	
-	*pool = pool_ptr;
+	pool_ptr->active_workers = 0;
 
+	pthread_cond_init(&pool_ptr->task_condvar, NULL);
+	pthread_mutex_init(&pool_ptr->active_workers_mutex, NULL);
+
+	*pool = pool_ptr;
 	return 0;
 }
 
