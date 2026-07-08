@@ -34,7 +34,7 @@ struct thread_task
 	void *arg;
 	int32_t status;
 	struct rlist rlist_node;
-	pthread_mutex_t state_mutex;
+	pthread_mutex_t status_mutex;
 	/* PUT HERE OTHER MEMBERS */
 };
 
@@ -52,34 +52,17 @@ struct thread_pool
 
 int get_task_status(struct thread_task *task)
 {
-	pthread_mutex_lock(&task->state_mutex);
+	pthread_mutex_lock(&task->status_mutex);
 	int state = task->status;
-	pthread_mutex_unlock(&task->state_mutex);
+	pthread_mutex_unlock(&task->status_mutex);
 	return state;
 }
 
-
-
-void increment_active_workers(struct thread_pool *pool)
+void set_task_status(struct thread_task *task, int status)
 {
-	pthread_mutex_lock(&pool->active_workers_mutex);
-	pool->active_workers++;
-	pthread_mutex_unlock(&pool->active_workers_mutex);
-}
-
-void decrement_active_workers(struct thread_pool *pool)
-{
-	pthread_mutex_lock(&pool->active_workers_mutex);
-	pool->active_workers--;
-	pthread_mutex_unlock(&pool->active_workers_mutex);
-}
-
-int get_active_workers(struct thread_pool *pool)
-{
-	pthread_mutex_lock(&pool->active_workers_mutex);
-	int count = pool->active_workers;
-	pthread_mutex_unlock(&pool->active_workers_mutex);
-	return count;
+	pthread_mutex_lock(&task->status_mutex);
+	task->status = status;
+	pthread_mutex_unlock(&task->status_mutex);
 }
 
 int
@@ -96,14 +79,14 @@ task_queue_push(struct task_queue *queue, struct thread_task *task)
 	pthread_mutex_lock(&queue->mutex);
 	if (queue->size >= TPOOL_MAX_TASKS)
 	{
-		pthread_mutex_unlock(&mutex);
+		pthread_mutex_unlock(&queue->mutex);
 		return TPOOL_ERR_TOO_MANY_TASKS;
 	}
 	
-	rlist_add_tail_entry(&queue->head, &task->rlist_node, rlist_node);
+	rlist_add_tail_entry(&queue->head, task, rlist_node);
 	queue->size++;
 	
-	pthread_mutex_unlock(&mutex);
+	pthread_mutex_unlock(&queue->mutex);
 	return 0;
 }
 
@@ -116,12 +99,19 @@ task_queue_pop(struct task_queue *queue)
 		pthread_mutex_unlock(&mutex);
 		return NULL;
 	}
+	struct thread_task *task = rlist_shift_entry(&queue->head, struct thread_task, rlist_node)ж
+	queue->size--;
 	
-	rlist_add_tail_entry(&queue->head, &task->rlist_node, rlist_node);
-	queue->size++;
-	
-	pthread_mutex_unlock(&mutex);
-	return 0;
+	pthread_mutex_unlock(&queue->mutex);
+	return task;
+}
+
+int task_queue_empty(struct task_queue *queue)
+{
+	pthread_mutex_lock(&queue->mutex);
+	int ret = rlist_empty(&queue->head);
+	pthread_mutex_unlock(&queue->mutex);
+	return ret;
 }
 
 int 
@@ -149,46 +139,24 @@ void worker(struct thread_pool *pool)
 	int run = 1;            			// how to terminate thread ?
 	int state = CHECK_TASK;
 	struct thread_task *task = NULL;
+	struct task_queue *task_queue = &pool->task_queue_head;
 
 	while (run)
 	{
-		switch (state)
+		pthread_mutex_lock(&task_queue->mutex);
+		while (rlist_empty(&task_queue->head)) 
 		{
-			case CHECK_TASK:
-			{
-				struct thread_task *task = task_queue_pop(&pool->task_queue_head);
-				if (NULL == task)
-				{
-					state = WAITING;
-				}
-				else
-				{
-					state = EXECUTE;
-				}
-			}
-			break;
-
-			case WAITING:
-			{
-
-			} 
-			break;
-
-			case EXECUTE:
-			{
-				if (NULL == task)
-				{
-					state = WAITING;
-				}
-				else
-				{
-					task->status = RUNNING;
-					task->function(arg);
-					task->status = END;
-				}
-			}
-			break;
+            pthread_cond_wait(&condvar, &task_queue->mutex);
 		}
+
+		task = rlist_shift_entry(&task_queue->head, struct thread_task, rlist_node);
+		task_queue->size--;
+
+		pthread_mutex_unlock(&task_queue->mutex);
+
+		set_task_status(task, RUNNING);
+		task->function(arg);
+		set_task_status(task, END);
 	}
 }
 
