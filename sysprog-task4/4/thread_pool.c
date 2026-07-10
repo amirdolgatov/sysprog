@@ -21,13 +21,6 @@ enum WORKER_STATE
 	TERMINATE
 };
 
-struct task_queue
-{
-	struct rlist head;
-	int size;
-	pthread_mutex_t mutex;			// защита очереди от одновременного доступа
-}
-
 struct thread_task
 {
 	thread_task_f function;
@@ -41,12 +34,14 @@ struct thread_task
 struct thread_pool
 {
 	pthread_t *threads;
-	uint32_t thread_count;
+	uint32_t thread_count;					// сколько сейчас потоков
+	uint32_t idle_threads;					// сколько сейчас потоков в работе
 	uint32_t thread_limit;
+	
 	pthread_cond_t new_task_condvar;   		// оповещение потоков о новой задаче
-	struct task_queue *queue;
-	int active_workers;
-	pthread_mutex_t active_workers_mutex;
+	struct rlist head;
+	int size;
+	pthread_mutex_t mutex;					// защита очереди от одновременного доступа
 	/* PUT HERE OTHER MEMBERS */
 };
 
@@ -74,85 +69,43 @@ task_queue_init(struct task_queue *queue)
 }
 
 int 
-task_queue_push(struct task_queue *queue, struct thread_task *task)
+task_queue_push(struct thread_pool *pool, struct thread_task *task)
 {
-	pthread_mutex_lock(&queue->mutex);
-	if (queue->size >= TPOOL_MAX_TASKS)
+	pthread_mutex_lock(&pool->mutex);
+	if (pool->size >= TPOOL_MAX_TASKS)
 	{
-		pthread_mutex_unlock(&queue->mutex);
+		pthread_mutex_unlock(&pool->mutex);
 		return TPOOL_ERR_TOO_MANY_TASKS;
 	}
 	
-	rlist_add_tail_entry(&queue->head, task, rlist_node);
-	queue->size++;
+	rlist_add_tail_entry(&pool->head, task, rlist_node);
+	pool->size++;
 	
-	pthread_mutex_unlock(&queue->mutex);
+	pthread_mutex_unlock(&pool->mutex);
 	return 0;
 }
 
-struct thread_task*
-task_queue_pop(struct task_queue *queue)
-{
-	pthread_mutex_lock(&queue->mutex);
-	if (queue->size == 0)
-	{
-		pthread_mutex_unlock(&mutex);
-		return NULL;
-	}
-	struct thread_task *task = rlist_shift_entry(&queue->head, struct thread_task, rlist_node)ж
-	queue->size--;
-	
-	pthread_mutex_unlock(&queue->mutex);
-	return task;
-}
-
-int task_queue_empty(struct task_queue *queue)
-{
-	pthread_mutex_lock(&queue->mutex);
-	int ret = rlist_empty(&queue->head);
-	pthread_mutex_unlock(&queue->mutex);
-	return ret;
-}
-
-int 
-create_thread(pthread_t *thread_id, thread_task_f function, void *arg)
-{
-	int result = pthread_create(thread_id, NULL, thread_function, arg);
-	if (0 == result) 
-	{
-        // эта функция не нужна ????
-    }
-    else
-    {
-    	fprintf(stderr, "Error creating thread\n");
-        return 1;
-    }
-}
-
-
 //! the main function, performs the work cycle of the thread
-void worker(struct thread_pool *pool)
+void* worker(void *arg)
 {
+	struct thread_pool *pool = (struct thread_pool *) arg;
 	// firstly increment
-	increment_active_workers(pool);
 	// second check task in queue
-	int run = 1;            			// how to terminate thread ?
-	int state = CHECK_TASK;
 	struct thread_task *task = NULL;
-	struct task_queue *task_queue = &pool->task_queue_head;
+	struct task_queue *task_queue = &pool->head;
 
-	while (run)
+	while (1)
 	{
 		pthread_mutex_lock(&task_queue->mutex);
 		while (rlist_empty(&task_queue->head)) 
 		{
-            pthread_cond_wait(&condvar, &task_queue->mutex);
+            pthread_cond_wait(&pool->new_task_condvar, &pool->mutex);
 		}
 
-		task = rlist_shift_entry(&task_queue->head, struct thread_task, rlist_node);
+		task = rlist_shift_entry(task_queue, struct thread_task, rlist_node);
 		task_queue->size--;
-
-		pthread_mutex_unlock(&task_queue->mutex);
+		pool->idle_threads--;
+		pthread_mutex_unlock(&pool->mutex);
 
 		set_task_status(task, RUNNING);
 		task->function(arg);
@@ -173,10 +126,10 @@ thread_pool_new(int max_thread_count, struct thread_pool **pool)
 	pool_ptr->threads = malloc(max_thread_count * sizeof(pthread_t));
 	pool_ptr->thread_limit = max_thread_count;
 	pool_ptr->thread_count = 0;
-	pool_ptr->active_workers = 0;
+	pool_ptr->idle_threads = 0;
 
-	pthread_cond_init(&pool_ptr->task_condvar, NULL);
-	pthread_mutex_init(&pool_ptr->active_workers_mutex, NULL);
+	pthread_cond_init(&pool_ptr->new_task_condvar, NULL);
+	pthread_mutex_init(&pool_ptr->mutex, NULL);
 
 	*pool = pool_ptr;
 	return 0;
@@ -200,9 +153,28 @@ int
 thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 {
 	/* IMPLEMENT THIS FUNCTION */
-
-	rlist_add_tail_entry(&pool->task_queue_head, &task->rlist_node, rlist_node);
-	return TPOOL_ERR_NOT_IMPLEMENTED;
+	// 1. Не превышено ли количество задач ?
+	pthread_mutex_lock(&pool->mutex);
+	if (pool->size >= TPOOL_MAX_TASKS)
+	{
+		pthread_mutex_unlock(&pool->mutex);
+		return TPOOL_ERR_TOO_MANY_TASKS;
+	}
+	else        // как реализовать ленивое создание потока ?
+	{
+		// 2. Есть ли свободные потоки ?
+		if (pool->thread_count < pool->thread_limit)
+		{
+			if (pool->idle_threads == 0)
+			{
+				int ret = pthread_create(&pool->threads[pool->thread_count++], NULL, worker, pool);
+				return ret;
+			} 
+		}
+		// just send signal
+		pthread_cond_broadcast(&pool->new_task_condvar);
+	}
+	return 0;
 }
 
 int
