@@ -32,6 +32,7 @@ struct thread_pool
 	uint32_t thread_count;					// сколько сейчас потоков
 	uint32_t idle_threads;					// сколько сейчас потоков в работе
 	uint32_t thread_limit;
+	bool shutdown;
 	
 	pthread_cond_t new_task_condvar;   		// оповещение потоков о новой задаче
 	struct rlist task_queue_head;
@@ -65,27 +66,36 @@ void* worker(void *arg)
 	while (1)
 	{
 		pthread_mutex_lock(&pool->mutex);   							// доступ к очереди и счетчику idle_threads в одной секции
-		while (rlist_empty(head)) 
+		while (rlist_empty(head) && !pool->shutdown) 
 		{
             pthread_cond_wait(&pool->new_task_condvar, &pool->mutex);		// ждем пока не появится новая задача
+		}
+
+		// may be this signal for exit ?
+		if (pool->shutdown)
+		{
+				printf("worker: shutdown\n");
+			pthread_mutex_unlock(&pool->mutex);
+			break;
 		}
 
 		task = rlist_shift_entry(head, struct thread_task, rlist_node);
 		pool->task_queue_size--;
 		pool->idle_threads--;
 		pthread_mutex_unlock(&pool->mutex);
-
 		pthread_mutex_lock(&task->status_mutex);
 		task->status = RUNNING;
 		pthread_mutex_unlock(&task->status_mutex);
 
-		task->result = task->function(arg);
+		// printf("Hey, I am worker, I am starting task %p\n", task);
+		task->result = task->function(task->arg);
 
 		pthread_mutex_lock(&task->status_mutex);
 		task->status = END;
 		pthread_mutex_unlock(&task->status_mutex);
 		pthread_cond_broadcast(&task->is_finished);
 	}
+	return NULL;
 }
 
 void stop_threads(struct thread_pool *pool)
@@ -108,6 +118,7 @@ thread_pool_new(int max_thread_count, struct thread_pool **pool)
 	pool_ptr->thread_limit = max_thread_count;
 	pool_ptr->thread_count = 0;
 	pool_ptr->idle_threads = 0;
+	pool_ptr->shutdown = 0;
 
 	pthread_cond_init(&pool_ptr->new_task_condvar, NULL);
 	pthread_mutex_init(&pool_ptr->mutex, NULL);
@@ -127,9 +138,21 @@ thread_pool_thread_count(const struct thread_pool *pool)
 int
 thread_pool_delete(struct thread_pool *pool)
 {
+	printf("test: thread_pool_delete\n");
 	/* IMPLEMENT THIS FUNCTION */   // вначале простое удаление, удаление памяти, останов потоков
-	stop_threads(pool);
+	pthread_mutex_lock(&pool->mutex);
+	printf("test: set pool->shutdown = 1\n");
+	pool->shutdown = 1;
+	printf("test: send signal\n");
+	pthread_cond_broadcast(&pool->new_task_condvar);      // all threads should to finish
+	pthread_mutex_unlock(&pool->mutex);
 
+	for (uint32_t i = 0; i < pool->thread_limit; ++i)
+	{
+		pthread_join(pool->threads[i], NULL);
+	}
+
+	// теперь, я сразу разрушаю мютекс ?
 	// handle memory returning
 	pthread_mutex_destroy(&pool->mutex);
 	pthread_cond_destroy(&pool->new_task_condvar);
@@ -163,12 +186,12 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 		{
 			if (pool->idle_threads == 0)
 			{
-				int ret = pthread_create(&pool->threads[pool->thread_count++], NULL, worker, pool);
-				return ret;
+				pthread_create(&pool->threads[pool->thread_count++], NULL, worker, pool);
 			} 
 		}
 		// just send signal
 		pthread_cond_broadcast(&pool->new_task_condvar);
+		pthread_mutex_unlock(&pool->mutex);
 	}
 	return 0;
 }
@@ -216,14 +239,22 @@ thread_task_join(struct thread_task *task, void **result)
 		pthread_mutex_unlock(&task->status_mutex);
 		return TPOOL_ERR_TASK_NOT_PUSHED;
 	}
+	else if (END == task->status)
+	{
+		// printf("Test thread: Oh! the task is already completed\n");
+		*result = task->result;
+		pthread_mutex_unlock(&task->status_mutex);
+	}
 	else
 	{
 		while (END != task->status)
 		{
+			// printf("Test thread: I should wait result\n");
 			pthread_cond_wait(&task->is_finished, &task->status_mutex);		
 			*result = task->result;
-			pthread_mutex_unlock(&task->status_mutex);
+			// printf("Test thread: Task is completed, result = %d\n", *((int *)task->result));
 		}
+		pthread_mutex_unlock(&task->status_mutex);
 	}
 	return 0;
 }
@@ -255,7 +286,7 @@ thread_task_delete(struct thread_task *task)
 	}
 	else
 	{
-		printf("thread_task_delete : task->status = %d\n", state);
+		// printf("thread_task_delete : task->status = %d\n", state);
 		// handle memory returning
 		pthread_mutex_destroy(&task->status_mutex);
 		pthread_cond_destroy(&task->is_finished);
