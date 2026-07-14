@@ -36,25 +36,10 @@ struct thread_pool
 	
 	pthread_cond_t new_task_condvar;   		// оповещение потоков о новой задаче
 	struct rlist task_queue_head;
-	int task_queue_size;
+	int tasks_in_pool;
 	pthread_mutex_t mutex;					// защита очереди от одновременного доступа
 	/* PUT HERE OTHER MEMBERS */
 };
-
-int get_task_status(struct thread_task *task)
-{
-	pthread_mutex_lock(&task->status_mutex);
-	int state = task->status;
-	pthread_mutex_unlock(&task->status_mutex);
-	return state;
-}
-
-void set_task_status(struct thread_task *task, int status)
-{
-	pthread_mutex_lock(&task->status_mutex);
-	task->status = status;
-	pthread_mutex_unlock(&task->status_mutex);
-}
 
 //! the main function, performs the work cycle of the thread
 void* worker(void *arg)
@@ -63,9 +48,12 @@ void* worker(void *arg)
 	struct thread_task *task = NULL;
 	struct rlist *head = &pool->task_queue_head;
 
+	// pthread_t id = pthread_self();
+
 	while (1)
 	{
-		pthread_mutex_lock(&pool->mutex);   							// доступ к очереди и счетчику idle_threads в одной секции
+		pthread_mutex_lock(&pool->mutex);   								// доступ к очереди и счетчику idle_threads в одной секции
+		pool->idle_threads++;
 		while (rlist_empty(head) && !pool->shutdown) 
 		{
             pthread_cond_wait(&pool->new_task_condvar, &pool->mutex);		// ждем пока не появится новая задача
@@ -74,25 +62,29 @@ void* worker(void *arg)
 		// may be this signal for exit ?
 		if (pool->shutdown)
 		{
-				printf("worker: shutdown\n");
+			// printf("worker [%lu]: shutdown\n", id);
 			pthread_mutex_unlock(&pool->mutex);
 			break;
 		}
 
 		task = rlist_shift_entry(head, struct thread_task, rlist_node);
-		pool->task_queue_size--;
 		pool->idle_threads--;
 		pthread_mutex_unlock(&pool->mutex);
 		pthread_mutex_lock(&task->status_mutex);
 		task->status = RUNNING;
 		pthread_mutex_unlock(&task->status_mutex);
 
-		// printf("Hey, I am worker, I am starting task %p\n", task);
+		// printf("worker [%lu]: I am starting task %p\n", id, task);
 		task->result = task->function(task->arg);
 
 		pthread_mutex_lock(&task->status_mutex);
 		task->status = END;
 		pthread_mutex_unlock(&task->status_mutex);
+
+		pthread_mutex_lock(&pool->mutex);
+		pool->tasks_in_pool--;
+		pthread_mutex_unlock(&pool->mutex);
+
 		pthread_cond_broadcast(&task->is_finished);
 	}
 	return NULL;
@@ -119,11 +111,11 @@ thread_pool_new(int max_thread_count, struct thread_pool **pool)
 	pool_ptr->thread_count = 0;
 	pool_ptr->idle_threads = 0;
 	pool_ptr->shutdown = 0;
+	pool_ptr->tasks_in_pool = 0;
 
 	pthread_cond_init(&pool_ptr->new_task_condvar, NULL);
 	pthread_mutex_init(&pool_ptr->mutex, NULL);
 	rlist_create(&pool_ptr->task_queue_head);
-	pool_ptr->task_queue_size = 0;
 
 	*pool = pool_ptr;
 	return 0;
@@ -132,18 +124,24 @@ thread_pool_new(int max_thread_count, struct thread_pool **pool)
 int
 thread_pool_thread_count(const struct thread_pool *pool)
 {
+	// printf("thread_count = %d\n", pool->thread_count);
 	return pool->thread_count;
 }
 
 int
 thread_pool_delete(struct thread_pool *pool)
 {
-	printf("test: thread_pool_delete\n");
+	// printf("test: thread_pool_delete\n");
 	/* IMPLEMENT THIS FUNCTION */   // вначале простое удаление, удаление памяти, останов потоков
 	pthread_mutex_lock(&pool->mutex);
-	printf("test: set pool->shutdown = 1\n");
+	if (pool->tasks_in_pool > 0)
+	{
+		pthread_mutex_unlock(&pool->mutex);
+		return TPOOL_ERR_HAS_TASKS;
+	}
+	// printf("test: set pool->shutdown = 1\n");
 	pool->shutdown = 1;
-	printf("test: send signal\n");
+	// printf("test: send signal\n");
 	pthread_cond_broadcast(&pool->new_task_condvar);      // all threads should to finish
 	pthread_mutex_unlock(&pool->mutex);
 
@@ -169,7 +167,7 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 	/* IMPLEMENT THIS FUNCTION */
 	// 1. Не превышено ли количество задач ?
 	pthread_mutex_lock(&pool->mutex);
-	if (pool->task_queue_size >= TPOOL_MAX_TASKS)
+	if (pool->tasks_in_pool >= TPOOL_MAX_TASKS)
 	{
 		pthread_mutex_unlock(&pool->mutex);
 		return TPOOL_ERR_TOO_MANY_TASKS;
@@ -178,7 +176,7 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 	{
 		// add task to queue
 		rlist_add_tail_entry(&pool->task_queue_head, task, rlist_node);
-		pool->task_queue_size++;
+		pool->tasks_in_pool++;
 		task->status = WAITING;
 
 		// 2. Do I need to create a new thread?
@@ -186,7 +184,8 @@ thread_pool_push_task(struct thread_pool *pool, struct thread_task *task)
 		{
 			if (pool->idle_threads == 0)
 			{
-				pthread_create(&pool->threads[pool->thread_count++], NULL, worker, pool);
+				pthread_create(&pool->threads[pool->thread_count], NULL, worker, pool);
+				pool->thread_count++;
 			} 
 		}
 		// just send signal

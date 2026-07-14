@@ -23,12 +23,14 @@ struct thread_task;
 
 typedef void *(*thread_task_f)(void *);
 
-enum {
+enum 
+{
 	TPOOL_MAX_THREADS = 20,
 	TPOOL_MAX_TASKS = 100000,
 };
 
-enum thread_poool_errcode {
+enum thread_poool_errcode 
+{
 	TPOOL_ERR_INVALID_ARGUMENT = 1,
 	TPOOL_ERR_TOO_MANY_TASKS,
 	TPOOL_ERR_HAS_TASKS,
