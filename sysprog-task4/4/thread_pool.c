@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <errno.h>
 
 #include <stdio.h>
 
@@ -56,7 +57,7 @@ void* worker(void *arg)
 		pool->idle_threads++;
 		while (rlist_empty(head) && !pool->shutdown) 
 		{
-            pthread_cond_wait(&pool->new_task_condvar, &pool->mutex);		// ждем пока не появится новая задача
+            		pthread_cond_wait(&pool->new_task_condvar, &pool->mutex);		// ждем пока не появится новая задача
 		}
 
 		// may be this signal for exit ?
@@ -263,11 +264,59 @@ thread_task_join(struct thread_task *task, void **result)
 int
 thread_task_timed_join(struct thread_task *task, double timeout, void **result)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)task;
-	(void)timeout;
-	(void)result;
-	return TPOOL_ERR_NOT_IMPLEMENTED;
+	pthread_mutex_lock(&task->status_mutex);
+	if (NONE == task->status)
+	{
+		pthread_mutex_unlock(&task->status_mutex);
+		return TPOOL_ERR_TASK_NOT_PUSHED;
+	}
+	if (END == task->status)
+	{
+		// printf("Test thread: Oh! the task is already completed\n");
+		*result = task->result;
+		pthread_mutex_unlock(&task->status_mutex);
+		return 0;
+	}
+
+	if (timeout == 0.0)
+	{
+		pthread_mutex_unlock(&task->status_mutex);
+		return TPOOL_ERR_TIMEOUT;
+	}
+
+	// Вычисляем абсолютное время дедлайна
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += (time_t)timeout;
+    ts.tv_nsec += (long)((timeout - (time_t)timeout) * 1e9);
+    if (ts.tv_nsec >= 1000000000L) 
+    {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+
+    int ret = 0;
+	while (END != task->status)
+	{
+		// printf("Test thread: I should wait result\n");
+		int rc = pthread_cond_timedwait(&task->is_finished, &task->status_mutex, &ts);		
+		// printf("Test thread: Task is completed, result = %d\n", *((int *)task->result));
+		
+		if (rc == ETIMEDOUT) 
+		{
+            // Таймаут истёк, а задача так и не завершилась
+            ret = TPOOL_ERR_TIMEOUT;
+            break;
+        }
+	}
+
+	if (ret == 0)
+	{
+		*result = task->result;
+	}
+
+	pthread_mutex_unlock(&task->status_mutex);
+	return ret;
 }
 
 #endif
