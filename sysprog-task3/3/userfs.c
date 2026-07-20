@@ -1,5 +1,6 @@
 #include "userfs.h"
 #include <stddef.h>
+#include <string.h>
 
 enum {
 	BLOCK_SIZE = 512,
@@ -49,7 +50,7 @@ static struct file *file_list = NULL;
 struct filedesc 
 {
 	struct file *file;
-
+	uint32_t pos;
 	/* PUT HERE OTHER MEMBERS */
 };
 
@@ -62,6 +63,29 @@ struct filedesc
 static struct filedesc **file_descriptors = NULL;
 static int file_descriptor_count = 0;
 static int file_descriptor_capacity = 0;
+
+// always add after
+void add_file_to_list(struct file *file)
+{
+	if (NULL == file_list)
+	{
+		file_list = malloc(sizeof(struct file));
+		file_list->next = file_list;   // инициализация
+		file_list->prev = file_list;
+	}
+
+	file->prev = file_list;
+	file->next = file_list->next;
+	file_list->next->prev = file;
+	file_list->next = file;
+}
+
+// deleting O(1)
+void delete_file_from_list(struct file *file)
+{
+	file->next->prev = file->prev;
+	file->prev->next = file->next;
+}
 
 int 
 insert_descriptor(struct filedesc *descriptor)
@@ -98,8 +122,27 @@ find_file(const char *filename)
 	struct file *find = NULL;
 	for (struct file *file = file_list->next; file != file_list; file = file->next)
 	{
-		
+		if (strcmp(filename, file->name) == 0)
+		{
+			find = file;
+			break;
+		}
 	}
+	return find;
+}
+
+struct file *create_file(const char *filename)
+{
+	struct file *new_file = malloc(sizeof(struct file));
+
+	if (NULL == file)
+	{
+		return file;
+	}
+
+	file->block_list = NULL;
+	file->last_block = NULL;
+	file->refs = 0;
 }
 
 enum ufs_error_code
@@ -111,15 +154,46 @@ ufs_errno()
 int
 ufs_open(const char *filename, int flags)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)filename;
-	(void)flags;
-	(void)file_list;
-	(void)file_descriptors;
-	(void)file_descriptor_count;
-	(void)file_descriptor_capacity;
-	ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-	return -1;
+	/* check file in userFS */
+	bool need_create = flags & UFS_CREATE;
+	struct file *file = find_file(filename);
+	
+	if (NULL == file && !need_create)
+	{
+		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;         // no file
+	}
+
+	if (NULL == file)
+	{
+		file = create_file(filename);
+	}
+
+	if (NULL == file)
+	{
+		ufs_error_code = UFS_ERR_NO_MEM;
+		return -1;
+	}
+
+	// Absolutely right, the file is in the file system.
+	// нужно увеличить количество ссылок и создать struct filedesc
+	file->refs++;
+
+	struct filedesc *descriptor = malloc(sizeof(struct filedesc));
+
+	if (NULL == descriptor)
+	{
+		ufs_error_code = UFS_ERR_NO_MEM;
+		return -1;
+	}
+
+	descriptor->pos = 0;
+	descriptor->file = file;
+
+	int index = insert_descriptor(descriptor);
+
+	ufs_error_code = UFS_ERR_NO_ERR;
+	return index;
 }
 
 ssize_t
