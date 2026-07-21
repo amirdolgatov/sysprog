@@ -1,6 +1,12 @@
 #include "userfs.h"
 #include <stddef.h>
 #include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+
+#define FILE_NAME_SIZE 32
 
 enum {
 	BLOCK_SIZE = 512,
@@ -42,6 +48,7 @@ struct file
 	struct file *prev;
 
 	/* PUT HERE OTHER MEMBERS */
+	bool is_deleted;
 };
 
 /** List of all files. */
@@ -65,7 +72,8 @@ static int file_descriptor_count = 0;
 static int file_descriptor_capacity = 0;
 
 // always add after
-void add_file_to_list(struct file *file)
+void 
+add_file_to_list(struct file *file)
 {
 	if (NULL == file_list)
 	{
@@ -81,10 +89,38 @@ void add_file_to_list(struct file *file)
 }
 
 // deleting O(1)
-void delete_file_from_list(struct file *file)
+void 
+delete_file_from_list(struct file *file)
 {
 	file->next->prev = file->prev;
 	file->prev->next = file->next;
+}
+
+void 
+free_blocks(struct block *block_list)
+{
+	if (NULL == block_list)
+	{
+		return;
+	}
+
+	struct block *block = block_list->next;
+	while (block != block_list)
+	{
+		struct block *next = block->next;
+		free(block->memory);
+		free(block);
+		block = next;
+	}
+
+	free(block_list);
+}
+
+void 
+free_file(struct file *file)
+{
+	free(file->name);
+	free_blocks(file->block_list);
 }
 
 int 
@@ -104,21 +140,29 @@ insert_descriptor(struct filedesc *descriptor)
 	}
 
 	int index = 0;
-	for ( ; index < file_descriptor_count; index++)
+	for ( ; index < file_descriptor_capacity; index++)
 	{
 		if (NULL == file_descriptors[index])          // find first free space
 		{
 			file_descriptors[index] = descriptor;
 			file_descriptor_count++;
+			break;
 		}
 	}
 
+	printf("insert_descriptor: file_descriptor_count = %d, file_descriptor_capacity = %d\n", 
+		file_descriptor_count, file_descriptor_capacity);
 	return index;
 }
 
 struct file *
 find_file(const char *filename)
 {
+	if (NULL == file_list)
+	{
+		return NULL;           // no files in userFS
+	}
+
 	struct file *find = NULL;
 	for (struct file *file = file_list->next; file != file_list; file = file->next)
 	{
@@ -131,9 +175,10 @@ find_file(const char *filename)
 	return find;
 }
 
-struct file *create_file(const char *filename)
+struct file *
+create_file(const char *filename)
 {
-	struct file *new_file = malloc(sizeof(struct file));
+	struct file *file = malloc(sizeof(struct file));
 
 	if (NULL == file)
 	{
@@ -143,6 +188,17 @@ struct file *create_file(const char *filename)
 	file->block_list = NULL;
 	file->last_block = NULL;
 	file->refs = 0;
+	file->next = NULL;
+	file->prev = NULL;
+	file->is_deleted = 0;
+
+	file->name = malloc(FILE_NAME_SIZE);
+	strcpy(file->name, filename);
+
+	// add file to list
+	add_file_to_list(file);
+
+	return file;
 }
 
 enum ufs_error_code
@@ -221,19 +277,76 @@ ufs_read(int fd, char *buf, size_t size)
 int
 ufs_close(int fd)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)fd;
-	ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-	return -1;
+	if (fd < 0)
+	{
+		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;
+	}
+
+	// close filedescriptor
+	if (fd >= file_descriptor_capacity)
+	{
+		printf("ufs_close: fd = %d, file_descriptor_capacity = %d\n", fd, file_descriptor_capacity);
+		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;
+	}
+
+	if (NULL == file_descriptors[fd])
+	{
+		printf("ufs_close: File is not opened\n");
+		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;
+	}
+
+	struct filedesc *filedesc = file_descriptors[fd];
+
+	if (filedesc->file->refs > 0)
+	{
+		filedesc->file->refs--;        
+	}
+
+	if (filedesc->file->refs == 0 && filedesc->file->is_deleted)
+	{
+		free_file(filedesc->file);
+		free(filedesc->file);
+	}
+
+	free(filedesc);
+	file_descriptors[fd] = NULL;
+
+	ufs_error_code = UFS_ERR_NO_ERR;
+	return 0;
 }
 
 int
 ufs_delete(const char *filename)
 {
-	/* IMPLEMENT THIS FUNCTION */
-	(void)filename;
-	ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-	return -1;
+	struct file *file = find_file(filename);
+	
+	if (NULL == file)
+	{
+		ufs_error_code = UFS_ERR_NO_FILE;
+		return -1;         // no file
+	}
+
+	// if file is closed, delete it immediatly
+	if (0 == file->refs)
+	{
+		free_file(file);
+		delete_file_from_list(file);
+		free(file);
+
+		ufs_error_code = UFS_ERR_NO_ERR;
+		return 0;         
+	}
+
+
+	// file is opened
+	delete_file_from_list(file);
+	file->is_deleted = 1;
+
+	ufs_error_code = UFS_ERR_NO_ERR;
+	return 0;         
 }
 
 #if NEED_RESIZE
