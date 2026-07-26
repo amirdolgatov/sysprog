@@ -12,7 +12,7 @@
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 enum {
-	BLOCK_SIZE = 512,
+	BLOCK_SIZE = 4096,
 	MAX_FILE_SIZE = 1024 * 1024 * 100,
 };
 
@@ -65,6 +65,7 @@ struct filedesc
 	
 	uint32_t block_offset;
 	uint32_t offset;
+	int flags;
 	/* PUT HERE OTHER MEMBERS */
 };
 
@@ -365,6 +366,7 @@ ufs_open(const char *filename, int flags)
 
 	descriptor->block_offset = 0;
 	descriptor->offset = 0;
+	descriptor->flags = flags;
 	descriptor->file = file;
 	descriptor->current_block = NULL;
 
@@ -390,15 +392,23 @@ ufs_write(int fd, const char *buf, size_t size)
 		return -1;	
 	}
 
+	// size is not null - we can read data
+	struct filedesc *descriptor = file_descriptors[fd];
+	struct file *file = descriptor->file;
+
+	/* permissions to write */
+	bool read_only = descriptor->flags & UFS_READ_ONLY;
+	if (read_only)
+	{
+		ufs_error_code = UFS_ERR_NO_PERMISSION;
+		return -1;
+	}
+
 	if (0 == size)
 	{
 		ufs_error_code = UFS_ERR_NO_ERR;
 		return 0;
 	}
-
-	// size is not null - we can read data
-	struct filedesc *descriptor = file_descriptors[fd];
-	struct file *file = descriptor->file;
 
 	// first data
 	if (0 == file->file_size)
@@ -489,14 +499,22 @@ ufs_read(int fd, char *buf, size_t size)
 		return -1;	
 	}
 
+	struct filedesc *descriptor = file_descriptors[fd];
+	struct file *file = descriptor->file;
+
+	/* permissions to write */
+	bool write_only = descriptor->flags & UFS_WRITE_ONLY;
+	if (write_only)
+	{
+		ufs_error_code = UFS_ERR_NO_PERMISSION;
+		return -1;
+	}
+
 	if (0 == size)
 	{
 		ufs_error_code = UFS_ERR_NO_ERR;
 		return 0;
 	}
-
-	struct filedesc *descriptor = file_descriptors[fd];
-	struct file *file = descriptor->file;
 
 	// empty file
 	if (0 == file->file_size)
@@ -643,4 +661,20 @@ ufs_resize(int fd, size_t new_size)
 void
 ufs_destroy(void)
 {
+	// 1. free descriptors table
+	for (int index = 0; index < file_descriptor_capacity; index++)
+	{
+		free(file_descriptors[index]);
+	}
+
+	free(file_descriptors);
+
+	// 2. free files
+	for (struct file *file = file_list; file != NULL; )
+	{
+		free_file(file);
+		struct file *next = file->next;
+		free(file);
+		file = next;
+	}
 }
